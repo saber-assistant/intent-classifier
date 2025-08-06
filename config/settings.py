@@ -1,4 +1,3 @@
-from typing import Callable, Dict, List
 import os
 
 APP_NAME = "intent-classifier"
@@ -34,48 +33,42 @@ LOG_FORMAT = os.getenv(
 # Middleware settings
 ALLOWED_HOSTS = os.getenv("SABER_ALLOWED_HOSTS", "*").split(",")
 
+
 # Classification settings
+ALL_INTENT_SEPARATOR_MODELS = {
+    "local_intent_separator": {
+        "path": "intent_separator.local_model.LocalIntentSeparator",
+    }
+}
+
+INTENT_SEPARATOR_MODEL = ALL_INTENT_SEPARATOR_MODELS[os.getenv("SABER_INTENT_SEPARATOR_MODEL", "local_intent_separator")]
+
+
 DEFAULT_INTENT_CONFIDENCE_THRESHOLD = float(
     os.getenv("SABER_DEFAULT_INTENT_CONFIDENCE_THRESHOLD", 0.80)
 )
 
-LayerSpec = Dict[str, object]
-
-
-def _regex_factory(
-    pattern_file: str, thr_env: str, thr_default: float
-) -> Callable[[], Dict]:
-    return lambda: {
-        "job_cost": 0,
-        "pattern_file": pattern_file,
-        "threshold": float(os.getenv(thr_env, thr_default)),
-    }
-
-
 # Full canonical list of classification layers
 # Each layer is a dict with:
-# - alias: unique identifier for the layer
+# - key/alias: unique identifier for the layer
 # - path: import path to the layer class
 # - factory: callable that returns a dict of parameters for the layer, doesn't complain about missing env vars for unused layers
-ALL_CLASSIFICATION_LAYERS: List[LayerSpec] = [
-    {
-        "alias": "basic_regex",
+ALL_CLASSIFICATION_LAYERS = {
+    "basic_regex": {
         "path": "intent_layers.regex.RegexMatcher",
         "factory": lambda: {
             "job_cost": 0,
-            "pattern_file": "basic_patterns.yaml"
+            "pattern_file": "basic_patterns.yaml",
         },
     },
-    {
-        "alias": "kitchen_regex",
+    "kitchen_regex": {
         "path": "intent_layers.regex.RegexMatcher",
         "factory": lambda: {
             "job_cost": 0,
-            "pattern_file": "kitchen_patterns.yaml"
+            "pattern_file": "kitchen_patterns.yaml",
         },
     },
-    {
-        "alias": "adaptive_db",
+    "adaptive_db": {
         "path": "intent_layers.adaptive_db.AdaptiveDBMatcher",
         "factory": lambda: {
             "job_cost": 1,
@@ -84,9 +77,8 @@ ALL_CLASSIFICATION_LAYERS: List[LayerSpec] = [
             "top_k": int(os.getenv("ADAPTIVE_DB_TOP_K", 5)),
         },
     },
-    {
-        "alias": "local_model",
-        "path": "intent_layers.local.LocalClassifier",
+    "local_model": {
+        "path": "intent_layers.local_model.LocalModelClassifier",
         "factory": lambda: {
             "job_cost": 5,
             "weights_path": "models/local_model.pt",
@@ -95,8 +87,7 @@ ALL_CLASSIFICATION_LAYERS: List[LayerSpec] = [
             "confidence_threshold": 0.75,
         },
     },
-    {
-        "alias": "external_llm",
+    "external_llm": {
         "path": "intent_layers.external.ExternalLLM",
         "factory": lambda: {
             "job_cost": 9,
@@ -107,24 +98,19 @@ ALL_CLASSIFICATION_LAYERS: List[LayerSpec] = [
             "timeout": 30,
         },
     },
-]
-
-# Whitelist (comma-sep aliases)
-# Enable all if not specified
-_ENABLED_LAYERS = {
-    a.strip() for a in os.getenv("ENABLED_LAYERS", "").split(",") if a.strip()
 }
-_selected = (
-    [layer for layer in ALL_CLASSIFICATION_LAYERS if layer["alias"] in _ENABLED_LAYERS]
-    if _ENABLED_LAYERS
-    else ALL_CLASSIFICATION_LAYERS
-)
 
+# Comma-separated whitelist. Enable *all* if empty
+_ENABLED = {a.strip() for a in os.getenv("ENABLED_LAYERS", "").split(",") if a.strip()}
+_selected_aliases = _ENABLED or ALL_CLASSIFICATION_LAYERS.keys()
+
+# Build ordered list (preserve the declared order in ALL_CLASSIFICATION_LAYERS)
 CLASSIFICATION_LAYERS = [
     {
-        "alias": spec["alias"],
+        "alias": alias,
         "path": spec["path"],
-        **spec["factory"](),  # env-vars evaluated only now
+        **spec["factory"](),          # factory runs only for enabled aliases
     }
-    for spec in _selected
+    for alias, spec in ALL_CLASSIFICATION_LAYERS.items()
+    if alias in _selected_aliases
 ]

@@ -7,11 +7,12 @@ from typing import Literal
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
+import httpx
 
 from .queue_store import get_queue, QueueBackend
 from .result_store import get_result_store, ResultBackend
 
-from .settings import conf
+from .conf import conf
 
 
 # --------------------------------------------------------------------------- #
@@ -39,9 +40,10 @@ result_store: ResultBackend
 class TaskIn(BaseModel):
     task_id: uuid.UUID = Field()
     job: Literal["classify"]
-    job_budget: int = 10
     content: str
+    job_budget: int = 10
     callback_url: str | None = None
+    priority_order: Literal["ascending", "descending"] = "ascending"
 
 
 # --------------------------------------------------------------------------- #
@@ -69,7 +71,14 @@ async def lifespan(app: FastAPI):
         )
     
     asyncio.create_task(task_queue.worker(process_task))
+    
     logger.info("Started queue worker and result store.")
+    
+    
+    for layer in conf.CLASSIFICATION_LAYERS:
+        await layer["instance"].setup()
+        logger.info("Initialized classification layer: %s", layer["alias"])
+
     try:
         yield
     finally:
@@ -103,35 +112,101 @@ async def get_task_result(task_id: uuid.UUID) -> dict:
 # --------------------------------------------------------------------------- #
 # Layer logic
 # --------------------------------------------------------------------------- #
+async def classify_segment(task: TaskIn, last_segment: str, segment: str, layers: list[dict], running_cost: int = 0) -> tuple[int, dict] | None:
+    for layer in layers:
+        if layer["cost"] + running_cost <= task.job_budget and \
+            await layer["instance"].matches_content(last_segment, segment):
+                
+            logger.info("Content matched by layer: %s", layer["alias"])
+            result = await layer["instance"].classify(last_segment, segment)
+            
+            logger.info("Classification result from layer %s: %s", layer["alias"], result)
+            running_cost += layer["cost"]
+            
+            await layer.on_complete(result)
+        
+            confidence_threshold = float(layer.get("confidence_threshold", conf.DEFAULT_INTENT_CONFIDENCE_THRESHOLD))
+            if result > confidence_threshold:
+                logger.info("Result meets confidence threshold: %s", result)
+                await layer.on_success(result)
+                return running_cost, result
+            else:
+                await layer.on_failure(result, "Result below confidence threshold")
+
+    return running_cost, None
+
+
+async def _post_callback(url: str, payload: dict) -> None:
+    """Fire-and-forget POST to the caller’s callback URL."""
+    headers = {
+        "Content-Type": "application/json",
+        "X-API-Key": "",        # fill if you decide to authenticate later
+    }
+    timeout = httpx.Timeout(10.0, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        
+        
+
 async def process_task(task: TaskIn) -> None:
-    logger.info("Processing task %s | level=%s | content=%r",
+    logger.info("Processing task %s | budget=%s | content=%r",
                 task.task_id, task.job_budget, task.content)
 
     try:
-        # Simulate processing
-        await asyncio.sleep(0.25)
+        layers = conf.CLASSIFICATION_LAYERS if task.priority_order == "descending" else reversed(conf.CLASSIFICATION_LAYERS)
         
+        # Find out how many intents to classify and their borders
+        intent_separator = conf.INTENT_SEPARATOR
 
-        result = {
+        # Assume with full confidence that each segment is independent from each other
+        # This is a simplification, but it makes handling large texts much easier.
+        logger.info("Segmenting content for classification.")
+        segments = await intent_separator.get_segments(task.content)
+
+        running_cost = 0
+        classification_results = []
+        
+        for i in range(len(segments)):
+            last_segment = segments[i - 1] if i > 0 else None
+            segment = segments[i]
+            logger.info("Processing segment %d/%d: %r", i + 1, len(segments), segment)
+            
+            running_cost, result = await classify_segment(task, last_segment, segment, layers, running_cost=running_cost)
+
+            if result is None:
+                logger.info("No classification result for segment %d", i + 1)
+                continue
+            
+            classification_results.append({
+                "segment": segment,
+                "result": result,
+            })
+
+
+        task_result = {
             "task_id": str(task.task_id),
-            "job": task.job,
-            "job_budget": task.job_budget,
             "status": "completed",
-            "result": f"Classification result for task {task.task_id}",
+            "result": classification_results,
             "timestamp": asyncio.get_event_loop().time()
         }
         
         # Store the result in the result store
-        await result_store.store_result(task.task_id, result)
+        await result_store.store_result(task.task_id, task_result)
         
         logger.info("Finished task %s and stored result", task.task_id)
         
+        if task.callback_url:
+            logger.info("Sending result to callback URL: %s", task.callback_url)
+            try:
+                await _post_callback(task.callback_url, task_result)
+            except Exception as exc:
+                logger.exception("Callback POST failed: %s", exc)
+        
+
     except Exception as e:
-        # Store error result
         error_result = {
             "task_id": str(task.task_id),
-            "job": task.job,
-            "job_budget": task.job_budget,
             "status": "failed",
             "error": str(e),
             "timestamp": asyncio.get_event_loop().time()

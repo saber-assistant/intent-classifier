@@ -26,6 +26,12 @@ conf_dict = {
     if k.isupper()
 }
 
+# Import classification layers
+if "CLASSIFICATION_LAYERS" in conf_dict:
+    for layer in conf_dict["CLASSIFICATION_LAYERS"]:
+        layer_module = importlib.import_module(layer["path"])
+        layer["instance"] = layer_module(**layer["factory"]())
+
 conf = SimpleNamespace(**conf_dict)
 settings = conf  # i prefer conf as the name personally but keeping both for compat.
 
