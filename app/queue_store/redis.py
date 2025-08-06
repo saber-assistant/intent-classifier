@@ -4,6 +4,7 @@ import json
 from redis.asyncio import Redis
 from .base import QueueBackend
 
+# move to conf + add methods to add/pop, that way we can use it in other places and skip http POST
 REDIS_LIST_NAME = "intent-tasks"
 
 class RedisQueue(QueueBackend):
