@@ -48,8 +48,8 @@ class IntentSeparator:
         raise NotImplementedError(
             "should_segment() must be implemented by subclasses"
         )
-        
-        
+
+
     async def get_segments(self, content: str) -> List[str]:
         """
         Split the given content into segments that can be independently classified.
