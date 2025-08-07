@@ -1,4 +1,3 @@
-
 import importlib
 import os
 from pathlib import Path
@@ -18,21 +17,25 @@ for env_file in (BASE_DIR / "envs" / f"{ENVIRONMENT}.env", BASE_DIR / ".env"):
     if env_file.exists():
         load_dotenv(env_file, override=False)
 
-settings_module = importlib.import_module("config.settings")
 
-conf_dict = {
-    k: getattr(settings_module, k)
-    for k in dir(settings_module)
-    if k.isupper()
-}
+def load_module(path: str):
+    module = importlib.import_module(path)
 
-# Import classification layers
-if "CLASSIFICATION_LAYERS" in conf_dict:
-    for layer in conf_dict["CLASSIFICATION_LAYERS"]:
-        layer_module = importlib.import_module(layer["path"])
-        layer["instance"] = layer_module(**layer["factory"]())
+    return {
+        k: getattr(module, k)
+        for k in dir(module)
+        if k.isupper() and not k.startswith("_")
+    }
 
-conf = SimpleNamespace(**conf_dict)
-settings = conf  # i prefer conf as the name personally but keeping both for compat.
 
-__all__ = ["conf", "settings"]
+conf = SimpleNamespace(**load_module("config.settings"))
+processors = SimpleNamespace(**load_module("config.processors"))
+
+for k in ["CLASSIFICATION_LAYERS", "INTENT_SEPARATORS"]:
+    if k in processors.__dict__:
+        for item in processors.__dict__[k]:
+            item_module = importlib.import_module(item["path"])
+            item["instance"] = item_module(**item["factory"]())
+            
+
+__all__ = ["conf", "processors"]

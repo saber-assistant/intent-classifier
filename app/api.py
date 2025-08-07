@@ -12,11 +12,10 @@ import httpx
 from .queue_store import get_queue, QueueBackend
 from .result_store import get_result_store, ResultBackend
 
-from .conf import conf
+from .conf import conf, processors
 
 
 # --------------------------------------------------------------------------- #
-
 logger = logging.getLogger(conf.APP_NAME)
 logging.basicConfig(level=conf.LOG_LEVEL,
                     format=conf.LOG_FORMAT)
@@ -41,6 +40,7 @@ class TaskIn(BaseModel):
     task_id: uuid.UUID = Field()
     job: Literal["classify"]
     content: str
+    is_partial: bool = False
     job_budget: int = 10
     callback_url: str | None = None
     priority_order: Literal["ascending", "descending"] = "ascending"
@@ -49,7 +49,6 @@ class TaskIn(BaseModel):
 # --------------------------------------------------------------------------- #
 # FastAPI
 # --------------------------------------------------------------------------- #
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Started lifespan context.")
@@ -112,36 +111,39 @@ async def get_task_result(task_id: uuid.UUID) -> dict:
 # --------------------------------------------------------------------------- #
 # Layer logic
 # --------------------------------------------------------------------------- #
-async def classify_segment(task: TaskIn, last_segment: str, segment: str, layers: list[dict], running_cost: int = 0) -> tuple[int, dict] | None:
+async def classify_segment(
+    task: TaskIn, last_segment: str, segment: str, layers: list[dict],
+    running_cost: int = 0, is_partial: bool = False
+) -> tuple[int, dict] | None:
+    
     for layer in layers:
-        if layer["cost"] + running_cost <= task.job_budget and \
-            await layer["instance"].matches_content(last_segment, segment):
-                
-            logger.info("Content matched by layer: %s", layer["alias"])
-            result = await layer["instance"].classify(last_segment, segment)
-            
-            logger.info("Classification result from layer %s: %s", layer["alias"], result)
-            running_cost += layer["cost"]
-            
-            await layer.on_complete(result)
-        
-            confidence_threshold = float(layer.get("confidence_threshold", conf.DEFAULT_INTENT_CONFIDENCE_THRESHOLD))
-            if result > confidence_threshold:
-                logger.info("Result meets confidence threshold: %s", result)
-                await layer.on_success(result)
-                return running_cost, result
-            else:
-                await layer.on_failure(result, "Result below confidence threshold")
+        if layer["cost"] + running_cost > task.job_budget:
+            continue
+        if not await layer["instance"].matches_content(last_segment, segment):
+            continue
 
+        result = await layer["instance"].classify(last_segment, segment, is_partial=is_partial)
+        running_cost += layer["cost"]
+        await layer.on_complete(result)
+
+        threshold = float(layer.get("confidence_threshold", conf.DEFAULT_INTENT_CONFIDENCE_THRESHOLD))
+        if result > threshold:
+            await layer.on_success(result)
+            return running_cost, result
+        else:
+            await layer.on_failure(result, "Result below confidence threshold")
     return running_cost, None
 
 
 async def _post_callback(url: str, payload: dict) -> None:
-    """Fire-and-forget POST to the caller’s callback URL."""
+    """Send a POST request to the caller's callback URL."""
     headers = {
         "Content-Type": "application/json",
-        "X-API-Key": "",        # fill if you decide to authenticate later
+        
     }
+    if conf.CALLBACK_API_KEY:
+        headers["X-Api-Key"] = conf.CALLBACK_API_KEY
+
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, json=payload, headers=headers)
@@ -152,18 +154,35 @@ async def _post_callback(url: str, payload: dict) -> None:
 async def process_task(task: TaskIn) -> None:
     logger.info("Processing task %s | budget=%s | content=%r",
                 task.task_id, task.job_budget, task.content)
+    
+    task_result = {
+        "task_id": str(task.task_id),
+        "status": "processing",
+        "timestamp": asyncio.get_event_loop().time(),
+        "is_partial": task.is_partial,
+    }
 
-    try:
-        layers = conf.CLASSIFICATION_LAYERS if task.priority_order == "descending" else reversed(conf.CLASSIFICATION_LAYERS)
-        
+    try:    
         # Find out how many intents to classify and their borders
-        intent_separator = conf.INTENT_SEPARATOR
+        intent_separators = processors.INTENT_SEPARATORS
 
         # Assume with full confidence that each segment is independent from each other
         # This is a simplification, but it makes handling large texts much easier.
         logger.info("Segmenting content for classification.")
-        segments = await intent_separator.get_segments(task.content)
+        
+        segments = [task.content]  # Default to single segment if no separators work
+        
+        for intent_separator in intent_separators:
+            if await intent_separator.check_condition(task.content):
+                new_segments = await intent_separator.get_segments(task.content)
 
+                if new_segments is not None and new_segments:
+                    segments = new_segments
+                    break
+
+
+        # Run segments through classification layers
+        layers = processors.CLASSIFICATION_LAYERS if task.priority_order == "ascending" else reversed(processors.CLASSIFICATION_LAYERS)
         running_cost = 0
         classification_results = []
         
@@ -172,7 +191,7 @@ async def process_task(task: TaskIn) -> None:
             segment = segments[i]
             logger.info("Processing segment %d/%d: %r", i + 1, len(segments), segment)
             
-            running_cost, result = await classify_segment(task, last_segment, segment, layers, running_cost=running_cost)
+            running_cost, result = await classify_segment(task, last_segment, segment, layers, running_cost=running_cost, is_partial=task.is_partial)
 
             if result is None:
                 logger.info("No classification result for segment %d", i + 1)
@@ -180,37 +199,31 @@ async def process_task(task: TaskIn) -> None:
             
             classification_results.append({
                 "segment": segment,
-                "result": result,
+                "eval": result,
             })
-
-
-        task_result = {
-            "task_id": str(task.task_id),
-            "status": "completed",
-            "result": classification_results,
-            "timestamp": asyncio.get_event_loop().time()
-        }
         
+        task_result["status"] = "completed"
+        task_result["results"] = classification_results
+        
+    # Incase of any error, store the error result
+    except Exception as e:
+        logger.exception("Error processing task %s", task.task_id)
+        task_result["status"] = "failed"
+        task_result["error"] = str(e)
+        
+    finally:
         # Store the result in the result store
         await result_store.store_result(task.task_id, task_result)
-        
         logger.info("Finished task %s and stored result", task.task_id)
-        
+            
+        # Let callback url know that its done if provided (failed or succeeded both)
         if task.callback_url:
             logger.info("Sending result to callback URL: %s", task.callback_url)
             try:
                 await _post_callback(task.callback_url, task_result)
-            except Exception as exc:
-                logger.exception("Callback POST failed: %s", exc)
-        
-
-    except Exception as e:
-        error_result = {
-            "task_id": str(task.task_id),
-            "status": "failed",
-            "error": str(e),
-            "timestamp": asyncio.get_event_loop().time()
-        }
-        
-        await result_store.store_result(task.task_id, error_result)
-        logger.error("Task %s failed: %s", task.task_id, str(e))
+            except httpx.RequestError as e:
+                logger.exception("An error occurred while requesting: %s", e)
+            except httpx.HTTPStatusError as e:
+                logger.exception("Callback URL returned status %s", e.response.status_code)
+            except Exception as e:
+                logger.exception("Callback POST failed: %s", e)
