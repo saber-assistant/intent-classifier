@@ -56,27 +56,28 @@ async def lifespan(app: FastAPI):
     logger.info("Started lifespan context.")
 
     global task_queue, result_store
-    task_queue = get_queue()
+    
+    # Initialize queue based on settings
+    queue_settings = conf.QUEUE_SETTINGS.get(conf.QUEUE_TYPE, {})
+    task_queue = get_queue(conf.QUEUE_TYPE, **queue_settings)
 
     # Initialize result store based on settings
-    if conf.RESULT_STORE_TYPE == "redis":
-        result_store = get_result_store(
-            conf.RESULT_STORE_TYPE,
-            url=conf.RESULT_STORE_REDIS_URL,
-            default_ttl=conf.RESULT_STORE_TTL,
-        )
-    else:
-        result_store = get_result_store(
-            conf.RESULT_STORE_TYPE, default_ttl=conf.RESULT_STORE_TTL
-        )
+    result_store_settings = conf.RESULT_STORE_SETTINGS.get(conf.RESULT_STORE_TYPE, {})
+    result_store = get_result_store(conf.RESULT_STORE_TYPE, **result_store_settings)
 
     asyncio.create_task(task_queue.worker(process_task))
 
     logger.info("Started queue worker and result store.")
 
-    for layer in conf.CLASSIFICATION_LAYERS:
+    for separator in processors.INTENT_SEPARATORS:
+        await separator["instance"].setup()
+        logger.info("Initialized intent separator: %s", separator["alias"])
+
+
+    for layer in processors.CLASSIFICATION_LAYERS:
         await layer["instance"].setup()
         logger.info("Initialized classification layer: %s", layer["alias"])
+
 
     try:
         yield
@@ -157,19 +158,17 @@ async def _post_callback(url: str, payload: dict) -> None:
 
 
 async def process_task(task: TaskIn) -> None:
-    logger.info(
-        "Processing task %s | budget=%s | content=%r",
-        task.task_id,
-        task.job_budget,
-        task.content,
-    )
-
     task_result = {
         "task_id": str(task.task_id),
         "status": "processing",
         "timestamp": asyncio.get_event_loop().time(),
         "is_partial": task.is_partial,
     }
+    
+    logger.info(
+        "Processing task %r",
+        task
+    )
 
     try:
         # Find out how many intents to classify and their borders
@@ -183,7 +182,7 @@ async def process_task(task: TaskIn) -> None:
 
         for intent_separator in intent_separators:
             if await intent_separator.check_condition(task.content):
-                new_segments = await intent_separator.get_segments(task.content)
+                new_segments = await intent_separator.create_segments(task.content)
                 if new_segments is not None and new_segments:
                     segments = new_segments
                     break
@@ -198,13 +197,12 @@ async def process_task(task: TaskIn) -> None:
         classification_results = []
 
         for i in range(len(segments)):
-            previous_segments = segments[:i]
             segment = segments[i]
             logger.info("Processing segment %d/%d: %r", i + 1, len(segments), segment)
 
             running_cost, result = await classify_segment(
                 task,
-                previous_segments,
+                segments[:i],
                 segment,
                 layers,
                 running_cost=running_cost,

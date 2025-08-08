@@ -31,10 +31,10 @@ def load_module(path: str):
 conf = SimpleNamespace(**load_module("config.settings"))
 processors = SimpleNamespace(**load_module("config.processors"))
 
-for k in ["CLASSIFICATION_LAYERS", "INTENT_SEPARATORS"]:
+for k in ["INTENT_SEPARATORS", "CLASSIFICATION_LAYERS"]:
     if k in processors.__dict__:
         for item in processors.__dict__[k]:
-            item_module = importlib.import_module(item["path"])
+            item_module = importlib.import_module(item["path"], package="intent_classifier")
             item["instance"] = item_module(**item["factory"]())
             
 

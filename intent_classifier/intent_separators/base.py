@@ -19,6 +19,13 @@ class IntentSeparator:
         """
         self.kwargs = kwargs
     
+    async def setup(self):
+        """
+        Setup method called during application initialization.
+        Override in subclasses to perform any initialization tasks.
+        """
+        pass
+    
     
     async def check_condition(self, content: str) -> bool:
         """
@@ -27,30 +34,10 @@ class IntentSeparator:
         This method can be used for optimization - if content doesn't need
         segmentation, it can skip the more expensive get_segments() operation.
         """
-        raise NotImplementedError(
-            "check_condition() must be implemented by subclasses"
-        )
+        return True
 
 
-    async def should_segment(self, content: str) -> bool:
-        """
-        Determine if the given content needs to be segmented based on certain keywords.
-        
-        This method can be used for optimization - if content doesn't need
-        segmentation, it can skip the more expensive get_segments() operation.
-        
-        Args:
-            content: The raw text content to analyze
-            
-        Returns:
-            True if the content should be segmented, False otherwise
-        """
-        raise NotImplementedError(
-            "should_segment() must be implemented by subclasses"
-        )
-
-
-    async def get_segments(self, content: str) -> List[str]:
+    async def create_segments(self, content: str) -> List[str]:
         """
         Split the given content into segments that can be independently classified.
         
