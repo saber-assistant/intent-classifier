@@ -41,7 +41,7 @@ DEFAULT_INTENT_CONFIDENCE_THRESHOLD = float(
 # - factory: callable that returns a dict of parameters for the layer, doesn't complain about missing env vars for unused layers
 ALL_CLASSIFICATION_LAYERS = {
     "local_model": {
-        "path": "intent_classifier.intent_layers.local_model.LocalModelClassifier",
+        "path": "intent_classifier.intent_layers.LocalModelIntentLayer",
         "factory": lambda: {
             "job_cost": 5,
             "weights_path": "models/local_model.pt",

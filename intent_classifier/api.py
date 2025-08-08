@@ -9,17 +9,19 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 import httpx
 
+
 from .queue_store import get_queue, QueueBackend
 from .result_store import get_result_store, ResultBackend
-
+from .utils import send_post_request
 from .conf import conf, processors
+from .logic import classify_segment, segment_text
 
 
 # --------------------------------------------------------------------------- #
 logger = logging.getLogger(conf.APP_NAME)
 logging.basicConfig(level=conf.LOG_LEVEL, format=conf.LOG_FORMAT)
 
-api_key_header = APIKeyHeader(name=conf.API_KEY, auto_error=False)
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def validate_api_key(key: str | None = Depends(api_key_header)) -> None:
@@ -109,54 +111,6 @@ async def get_task_result(task_id: uuid.UUID) -> dict:
     return result
 
 
-# --------------------------------------------------------------------------- #
-# Layer logic
-# --------------------------------------------------------------------------- #
-async def classify_segment(
-    task: TaskIn,
-    previous_segments: list[str],
-    segment: str,
-    layers: list[dict],
-    running_cost: int = 0,
-    is_partial: bool = False,
-) -> tuple[int, dict] | None:
-    for layer in layers:
-        if layer["cost"] + running_cost > task.job_budget or not await layer[
-            "instance"
-        ].check_condition(previous_segments, segment, is_partial=is_partial):
-            continue
-
-        result = await layer["instance"].classify(
-            previous_segments, segment, is_partial=is_partial
-        )
-        running_cost += layer["cost"]
-        await layer.on_complete(result)
-
-        threshold = float(
-            layer.get("confidence_threshold", conf.DEFAULT_INTENT_CONFIDENCE_THRESHOLD)
-        )
-        if result > threshold:
-            await layer.on_success(result)
-            return running_cost, result
-        else:
-            await layer.on_failure(result, "Result below confidence threshold")
-    return running_cost, None
-
-
-async def _post_callback(url: str, payload: dict) -> None:
-    """Send a POST request to the caller's callback URL."""
-    headers = {
-        "Content-Type": "application/json",
-    }
-    if conf.CALLBACK_API_KEY:
-        headers["X-Api-Key"] = conf.CALLBACK_API_KEY
-
-    timeout = httpx.Timeout(10.0, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-
-
 async def process_task(task: TaskIn) -> None:
     task_result = {
         "task_id": str(task.task_id),
@@ -172,20 +126,7 @@ async def process_task(task: TaskIn) -> None:
 
     try:
         # Find out how many intents to classify and their borders
-        intent_separators = processors.INTENT_SEPARATORS
-
-        # Assume with full confidence that each segment is independent from each other
-        # This is a simplification, but it makes handling large texts much easier.
-        logger.info("Segmenting content for classification.")
-
-        segments = [task.content]  # Default to single segment if no separators work
-
-        for intent_separator in intent_separators:
-            if await intent_separator.check_condition(task.content):
-                new_segments = await intent_separator.create_segments(task.content)
-                if new_segments is not None and new_segments:
-                    segments = new_segments
-                    break
+        segments = await segment_text(processors.INTENT_SEPARATORS, task.content)
 
         # Run segments through classification layers
         layers = (
@@ -199,6 +140,7 @@ async def process_task(task: TaskIn) -> None:
         for i in range(len(segments)):
             segment = segments[i]
             logger.info("Processing segment %d/%d: %r", i + 1, len(segments), segment)
+            logger.debug("Current running cost: %d", running_cost)
 
             running_cost, result = await classify_segment(
                 task,
@@ -208,6 +150,7 @@ async def process_task(task: TaskIn) -> None:
                 running_cost=running_cost,
                 is_partial=task.is_partial,
             )
+            logger.debug("Segment %d result: %r, updated running cost: %d", i + 1, result, running_cost)
             if result is None:
                 logger.info("No classification result for segment %d", i + 1)
                 continue
@@ -221,15 +164,18 @@ async def process_task(task: TaskIn) -> None:
 
         task_result["status"] = "completed"
         task_result["results"] = classification_results
+        logger.debug("Task completed with results: %r", classification_results)
 
     # Incase of any error, store the error result
     except Exception as e:
         logger.exception("Error processing task %s", task.task_id)
         task_result["status"] = "failed"
         task_result["error"] = str(e)
+        logger.debug("Task failed with error: %s", str(e))
 
     finally:
         # Store the result in the result store
+        logger.debug("Storing result for task %s: %r", task.task_id, task_result)
         await result_store.store_result(task.task_id, task_result)
         logger.info("Finished task %s and stored result", task.task_id)
 
@@ -237,7 +183,8 @@ async def process_task(task: TaskIn) -> None:
         if task.callback_url:
             logger.info("Sending result to callback URL: %s", task.callback_url)
             try:
-                await _post_callback(task.callback_url, task_result)
+                await send_post_request(task.callback_url, task_result)
+                logger.debug("Callback POST succeeded for URL: %s", task.callback_url)
             except httpx.RequestError as e:
                 logger.exception("An error occurred while requesting: %s", e)
             except httpx.HTTPStatusError as e:

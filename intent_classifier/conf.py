@@ -11,7 +11,7 @@ ENVIRONMENT = (
     or "development"
 ).lower()
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 for env_file in (BASE_DIR / "envs" / f"{ENVIRONMENT}.env", BASE_DIR / ".env"):
     if env_file.exists():
@@ -27,6 +27,12 @@ def load_module(path: str):
         if k.isupper() and not k.startswith("_")
     }
 
+def load_class(path: str, factory: dict):
+    mod_path, _, attr = path.rpartition(".")
+    module = importlib.import_module(mod_path)
+    clazz = getattr(module, attr)
+    return clazz(**factory)
+
 
 conf = SimpleNamespace(**load_module("config.settings"))
 processors = SimpleNamespace(**load_module("config.processors"))
@@ -34,8 +40,6 @@ processors = SimpleNamespace(**load_module("config.processors"))
 for k in ["INTENT_SEPARATORS", "CLASSIFICATION_LAYERS"]:
     if k in processors.__dict__:
         for item in processors.__dict__[k]:
-            item_module = importlib.import_module(item["path"], package="intent_classifier")
-            item["instance"] = item_module(**item["factory"]())
-            
+            item["instance"] = load_class(item["path"], item.get("factory", {}))
 
 __all__ = ["conf", "processors"]

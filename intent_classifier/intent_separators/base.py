@@ -29,12 +29,9 @@ class IntentSeparator:
     
     async def check_condition(self, content: str) -> bool:
         """
-        Determine if the given content needs to be segmented based on certain keywords.
-        
-        This method can be used for optimization - if content doesn't need
-        segmentation, it can skip the more expensive get_segments() operation.
+        By default, returns True for any content with a length greater than 5 characters.
         """
-        return True
+        return len(content) > 5
 
 
     async def create_segments(self, content: str) -> List[str]:
@@ -62,7 +59,7 @@ class IntentSeparator:
     
 
 
-    async def _validate_segment(self, segment: str) -> bool:
+    async def validate_segment(self, segment: str) -> bool:
         """
         Validate that the generated segments are reasonable.
         
