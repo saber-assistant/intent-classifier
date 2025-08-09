@@ -19,9 +19,9 @@ class IntentSeparator:
         """
         self.kwargs = kwargs
     
-    async def setup(self):
+    async def on_startup(self):
         """
-        Setup method called during application initialization.
+        Startup method called during application initialization.
         Override in subclasses to perform any initialization tasks.
         """
         pass

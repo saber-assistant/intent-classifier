@@ -6,7 +6,7 @@ authors = [
     {name = "corgi-in-tights",email = "59304120+corgi-in-tights@users.noreply.github.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "fastapi[standard] (>=0.116.1,<0.117.0)",
     "ruff (>=0.12.7,<0.13.0)",
@@ -96,4 +96,12 @@ docstring-code-format = false
 docstring-code-line-length = "dynamic"
 [tool.poetry.group.production.dependencies]
 redis = "^6.3.0"
+
+
+[tool.poetry.group.extra.dependencies]
+litellm = "^1.75.4"
+
+
+[tool.poetry.group.local_model.dependencies]
+torch = "^2.8.0"
 

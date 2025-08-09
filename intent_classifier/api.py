@@ -72,12 +72,12 @@ async def lifespan(app: FastAPI):
     logger.info("Started queue worker and result store.")
 
     for separator in processors.INTENT_SEPARATORS:
-        await separator["instance"].setup()
+        await separator["instance"].on_startup()
         logger.info("Initialized intent separator: %s", separator["alias"])
 
 
     for layer in processors.CLASSIFICATION_LAYERS:
-        await layer["instance"].setup()
+        await layer["instance"].on_startup()
         logger.info("Initialized classification layer: %s", layer["alias"])
 
 

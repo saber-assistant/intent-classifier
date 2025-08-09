@@ -3,9 +3,9 @@ class IntentLayer:
     Base class for all intent layers.
     """
     def __init__(self, **kwargs):
-        pass
+        self.other_kwargs = kwargs
     
-    async def setup(self):
+    async def on_startup(self):
         pass
 
     async def check_condition(self, previous_segments: list[str], segment: str, is_partial: bool = False) -> bool:
